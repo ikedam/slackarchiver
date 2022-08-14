@@ -221,9 +221,13 @@ func archiveChannel(
 					return err
 				}
 			}
+			var threadID string
+			if msg.ThreadTimestamp != "" && msg.Timestamp == msg.ThreadTimestamp {
+				threadID = msg.ThreadTimestamp
+			}
 			messages = append(messages, message{
 				ChannelID: channel.ID,
-				ThreadID:  msg.ThreadTimestamp,
+				ThreadID:  threadID,
 				Name:      name,
 				Timestamp: timestamp,
 				Text:      text,
