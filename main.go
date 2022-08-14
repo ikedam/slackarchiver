@@ -48,25 +48,41 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	now := time.Now().UTC()
+	now := time.Now()
 	startTime := time.Date(
 		now.Year(),
 		now.Month(),
 		1,
 		0, 0, 0, 0,
-		time.UTC,
+		time.Local,
 	)
 	for _, channel := range channels {
-		if !channel.IsArchived && !channel.IsMember {
-			fmt.Printf(
-				"Not a member: ID: %v, Name: %v, IsArchived: %v, Created: %v\n",
-				channel.ID,
-				channel.Name,
-				channel.IsArchived,
-				channel.Created.Time(),
-			)
-			continue
-		}
+		fmt.Printf(
+			"ID: %v, Name: %v, IsArchived: %v, IsMember: %v, IsPrivate: %v\n",
+			channel.ID,
+			channel.Name,
+			channel.IsArchived,
+			channel.IsMember,
+			channel.IsPrivate,
+		)
+		/*
+			if channel.IsMember {
+				_, err := api.LeaveConversationContext(ctx, channel.ID)
+				if err != nil {
+					panic(err)
+				}
+			}
+		*/
+		/*
+			if !channel.IsArchived && !channel.IsMember {
+				_, _, _, err := api.JoinConversationContext(ctx, channel.ID)
+				if err != nil {
+					fmt.Printf("    ERROR: Not a member/Failed to join: %+v\n", err)
+					continue
+				}
+				fmt.Printf("    JOINED\n")
+			}
+		*/
 		channelDir := filepath.Join(domainDir, channel.Name)
 		err = os.MkdirAll(channelDir, 0777)
 		if err != nil {
@@ -144,13 +160,6 @@ func archiveChannel(
 	channelDir string,
 	startTime time.Time,
 ) error {
-	fmt.Printf(
-		"ID: %v, Name: %v, IsArchived: %v, Created: %v\n",
-		channel.ID,
-		channel.Name,
-		channel.IsArchived,
-		channel.Created.Time(),
-	)
 	collected, err := isAlreadyCollected(channelDir, startTime.AddDate(0, -1, 0).Format("2006-01"))
 	if err != nil {
 		return err
@@ -263,10 +272,11 @@ func extractText(ctx context.Context, api *slack.Client, msg slack.Message) stri
 			builder.WriteString("(エラー)")
 			builder.WriteString(err.Error())
 			fmt.Printf(
-				"ERROR: Failed to get file info: %v in %v (%v)",
+				"ERROR: Failed to get file info: %v in %v (%v): %+v\n",
 				file.ID,
 				msg.Channel,
 				msg.Text,
+				err,
 			)
 		} else {
 			builder.WriteString(fileInfo.Name)
