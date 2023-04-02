@@ -1,18 +1,18 @@
 package main
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/slack-go/slack"
+	"google.golang.org/api/drive/v3"
 )
 
 func main() {
@@ -30,10 +30,29 @@ func main() {
 	domain := fmt.Sprintf("%v.slack.com", team.Domain)
 	fmt.Printf("%v\n", domain)
 
-	domainDir := filepath.Join("archive", domain)
-	err = os.MkdirAll(domainDir, 0777)
+	driveService, err := drive.NewService(ctx)
 	if err != nil {
 		panic(err)
+	}
+
+	folderID := os.Getenv("GOOGLE_DRIVE_FOLDER_ID")
+	/*
+		permissionList, err := driveService.Permissions.List(folderID).
+			Fields("permissions(emailAddress)").
+			Do()
+		if err != nil {
+			panic(err)
+		}
+		for _, permission := range permissionList.Permissions {
+			fmt.Printf("%+v\n", *permission)
+		}
+	*/
+	rootFolder, err := driveService.Files.Get(folderID).Fields("id, name").Do()
+	if err != nil {
+		panic(err)
+	}
+	if rootFolder.Name != domain {
+		panic(fmt.Errorf("google drive folder name must be %v, but %v", domain, rootFolder.Name))
 	}
 
 	users, err := api.GetUsersContext(ctx)
@@ -83,16 +102,49 @@ func main() {
 				fmt.Printf("    JOINED\n")
 			}
 		*/
-		channelDir := filepath.Join(domainDir, channel.Name)
-		err = os.MkdirAll(channelDir, 0777)
+
+		channelFolder, err := getOrCreateFolder(driveService, rootFolder, channel.Name)
 		if err != nil {
 			panic(err)
 		}
-		err := archiveChannel(ctx, api, userMap, &channel, channelDir, startTime)
+		err = archiveChannel(ctx, api, driveService, userMap, &channel, channelFolder, startTime)
 		if err != nil {
 			panic(err)
 		}
 	}
+}
+
+func getOrCreateFolder(driveService *drive.Service, rootFolder *drive.File, name string) (*drive.File, error) {
+	fileList, err := driveService.Files.List().
+		Fields("files(id, name, mimeType, parents)").
+		Q(fmt.Sprintf("'%s' in parents and name='%s'", rootFolder.Id, name)).
+		Do()
+	if err != nil {
+		return nil, err
+	}
+	if len(fileList.Files) > 1 {
+		return nil, fmt.Errorf("more than 1 folder found: %v", name)
+	}
+	if len(fileList.Files) == 1 {
+		folder := fileList.Files[0]
+		if folder.MimeType != "application/vnd.google-apps.folder" {
+			return nil, fmt.Errorf("not a folder: %v", name)
+		}
+		return folder, nil
+	}
+	folderInfo := &drive.File{
+		Name:     name,
+		Parents:  []string{rootFolder.Id},
+		MimeType: "application/vnd.google-apps.folder",
+	}
+	folder, err := driveService.Files.Create(folderInfo).
+		Fields("id, name, mimeType, parents").
+		Do()
+	if err != nil {
+		return nil, err
+	}
+	fmt.Printf("    Create: %v/%v (%v)\n", rootFolder.Name, folder.Name, folder.Id)
+	return folder, nil
 }
 
 func timestampToTime(timestamp string) (time.Time, error) {
@@ -155,12 +207,13 @@ type message struct {
 func archiveChannel(
 	ctx context.Context,
 	api *slack.Client,
+	driveService *drive.Service,
 	userMap map[string]string,
 	channel *slack.Channel,
-	channelDir string,
+	channelFolder *drive.File,
 	startTime time.Time,
 ) error {
-	collected, err := isAlreadyCollected(channelDir, startTime.AddDate(0, -1, 0).Format("2006-01"))
+	collected, err := isAlreadyCollected(driveService, channelFolder, startTime.AddDate(0, -1, 0).Format("2006-01"))
 	if err != nil {
 		return err
 	}
@@ -198,27 +251,36 @@ func archiveChannel(
 			yearMonth := timestamp.Format("2006-01") // yyyy-MM
 			if currentYearMonth == "" {
 				currentYearMonth = yearMonth
-				file := filepath.Join(channelDir, fmt.Sprintf("%v.txt", currentYearMonth))
-				if _, err := os.Stat(file); err == nil {
-					// すでに収集済み
-					return nil
-				} else if !os.IsNotExist(err) {
+				collected, err := isAlreadyCollected(
+					driveService,
+					channelFolder,
+					currentYearMonth,
+				)
+				if err != nil {
 					return err
 				}
+				if collected {
+					// すでに収集済み
+					return nil
+				}
 			} else if currentYearMonth != yearMonth {
-				file := filepath.Join(channelDir, fmt.Sprintf("%v.txt", currentYearMonth))
-				err := archiveMessages(ctx, api, userMap, file, messages)
+				err := archiveMessages(ctx, api, driveService, userMap, channelFolder, currentYearMonth, messages)
 				if err != nil {
 					return err
 				}
 				currentYearMonth = yearMonth
 				messages = nil
-				file = filepath.Join(channelDir, fmt.Sprintf("%v.txt", currentYearMonth))
-				if _, err := os.Stat(file); err == nil {
+				collected, err := isAlreadyCollected(
+					driveService,
+					channelFolder,
+					currentYearMonth,
+				)
+				if err != nil {
+					return err
+				}
+				if collected {
 					// すでに収集済み
 					return nil
-				} else if !os.IsNotExist(err) {
-					return err
 				}
 			}
 			var threadID string
@@ -238,8 +300,7 @@ func archiveChannel(
 		}
 	}
 	if len(messages) > 0 {
-		file := filepath.Join(channelDir, fmt.Sprintf("%v.txt", currentYearMonth))
-		err := archiveMessages(ctx, api, userMap, file, messages)
+		err := archiveMessages(ctx, api, driveService, userMap, channelFolder, currentYearMonth, messages)
 		if err != nil {
 			return err
 		}
@@ -247,14 +308,19 @@ func archiveChannel(
 	return nil
 }
 
-func isAlreadyCollected(channelDir, yearMonth string) (bool, error) {
-	file := filepath.Join(channelDir, fmt.Sprintf("%v.txt", yearMonth))
-	if _, err := os.Stat(file); err == nil {
-		return true, nil
-	} else if !os.IsNotExist(err) {
+func isAlreadyCollected(driveService *drive.Service, channelFolder *drive.File, yearMonth string) (bool, error) {
+	name := fmt.Sprintf("%v.txt", yearMonth)
+	fileList, err := driveService.Files.List().
+		Fields("files(id, name, mimeType, parents)").
+		Q(fmt.Sprintf("'%s' in parents and name='%s'", channelFolder.Id, name)).
+		Do()
+	if err != nil {
 		return false, err
 	}
-	return false, nil
+	if len(fileList.Files) > 1 {
+		return false, fmt.Errorf("more than 1 folder found: %v/%v", channelFolder.Name, name)
+	}
+	return len(fileList.Files) == 1, nil
 }
 
 func extractText(ctx context.Context, api *slack.Client, msg slack.Message) string {
@@ -289,15 +355,16 @@ func extractText(ctx context.Context, api *slack.Client, msg slack.Message) stri
 	return builder.String()
 }
 
-func archiveMessages(ctx context.Context, api *slack.Client, userMap map[string]string, file string, messages []message) error {
-	fh, err := os.Create(file)
-	if err != nil {
-		return err
-	}
-	defer fh.Close()
-	writer := bufio.NewWriter(fh)
-	defer writer.Flush()
-
+func archiveMessages(
+	ctx context.Context,
+	api *slack.Client,
+	driveService *drive.Service,
+	userMap map[string]string,
+	channelFolder *drive.File,
+	yearMonth string,
+	messages []message,
+) error {
+	writer := &bytes.Buffer{}
 	for idx := len(messages) - 1; idx >= 0; idx-- {
 		msg := messages[idx]
 		fmt.Fprintf(writer, "%v %v\n%v\n\n", msg.Name, msg.Timestamp.Format("2006-01-02 03:04:05"), msg.Text)
@@ -305,9 +372,19 @@ func archiveMessages(ctx context.Context, api *slack.Client, userMap map[string]
 		if err != nil {
 			return err
 		}
-		writer.Flush()
 	}
-	fmt.Printf("    %v\n", file)
+
+	fileInfo := &drive.File{
+		Name:     fmt.Sprintf("%v.txt", yearMonth),
+		Parents:  []string{channelFolder.Id},
+		MimeType: "text/plain",
+	}
+	file, err := driveService.Files.Create(fileInfo).Media(writer).Do()
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("    %v (%v)\n", file.Name, file.Id)
 	return nil
 }
 
