@@ -18,7 +18,7 @@ jobs:
       - id: auth
         uses: google-github-actions/auth@v1
         with:
-          workload_identity_provider: projects/ikedam/locations/global/workloadIdentityPools/github-actions/providers/slackarchiver
+          workload_identity_provider: projects/995040779468/locations/global/workloadIdentityPools/github-actions/providers/slackarchiver
           service_account: slackarchiver@ikedam.iam.gserviceaccount.com
       - name: archive
         run: go run .
