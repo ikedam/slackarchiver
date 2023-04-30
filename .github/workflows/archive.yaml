@@ -6,6 +6,9 @@ on:
     - cron: '31 0 1 * *'
 jobs:
   archive:
+    permissions:
+      # Required for google-github-actions/auth@v1
+      id-token: write
     runs-on: ubuntu-latest
     steps:
       - id: auth
