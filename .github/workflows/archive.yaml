@@ -25,3 +25,4 @@ jobs:
         env:
           TZ: JST
           SLACK_TOKEN: ${secrets.SLACK_TOKEN}
+          GOOGLE_DRIVE_FOLDER_ID: ${secrets.GOOGLE_DRIVE_FOLDER_ID}
