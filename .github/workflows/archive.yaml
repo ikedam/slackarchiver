@@ -26,3 +26,4 @@ jobs:
           TZ: JST
           SLACK_TOKEN: ${{ secrets.SLACK_TOKEN}}
           GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
+          CLOUDSDK_CORE_PROJECT: 995040779468
